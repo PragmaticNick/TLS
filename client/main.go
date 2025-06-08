@@ -4,80 +4,10 @@ import (
 	"bytes"
 	"crypto/rand"
 	"crypto/tls"
-	"encoding/binary"
 	"fmt"
 	"net"
 	"time"
 )
-
-type Extension struct {
-	Type uint16
-	Data []byte
-}
-
-type Random struct {
-	UnixTime    uint32
-	RandomBytes [28]byte
-}
-
-type ClientHello struct {
-	ProtocolVersion    [2]byte
-	Random             Random
-	SessionID          []byte
-	CipherSuites       []uint16
-	CompressionMethods []byte
-	Extensions         []Extension
-}
-
-func (c *ClientHello) Serialize() []byte {
-	body := c.serializeBody()
-	buffer := new(bytes.Buffer)
-
-	binary.Write(buffer, binary.BigEndian, []byte{0x01})
-	binary.Write(buffer, binary.BigEndian, [3]byte{byte(len(body) >> 16), byte(len(body) >> 8), byte(len(body))})
-	binary.Write(buffer, binary.BigEndian, body)
-
-	return buffer.Bytes()
-}
-
-func (c *ClientHello) serializeBody() []byte {
-	buffer := new(bytes.Buffer)
-
-	binary.Write(buffer, binary.BigEndian, c.ProtocolVersion)
-	binary.Write(buffer, binary.BigEndian, c.Random.UnixTime)
-	binary.Write(buffer, binary.BigEndian, c.Random.RandomBytes)
-	binary.Write(buffer, binary.BigEndian, uint8(len(c.SessionID)))
-	binary.Write(buffer, binary.BigEndian, c.SessionID)
-	binary.Write(buffer, binary.BigEndian, uint16(len(c.CipherSuites)*2))
-	binary.Write(buffer, binary.BigEndian, c.CipherSuites)
-	binary.Write(buffer, binary.BigEndian, uint8(len(c.CompressionMethods)))
-	binary.Write(buffer, binary.BigEndian, c.CompressionMethods)
-
-	extBuffer := new(bytes.Buffer)
-	for _, ext := range c.Extensions {
-		binary.Write(extBuffer, binary.BigEndian, ext.Type)
-		binary.Write(extBuffer, binary.BigEndian, uint16(len(ext.Data)))
-		binary.Write(extBuffer, binary.BigEndian, ext.Data)
-	}
-
-	binary.Write(buffer, binary.BigEndian, uint16(len(extBuffer.Bytes())))
-	binary.Write(buffer, binary.BigEndian, extBuffer.Bytes())
-
-	return buffer.Bytes()
-}
-
-var ProtocolVersion = [2]byte{0x03, 0x03}
-
-func tlsRecord(payload []byte) []byte {
-	buffer := new(bytes.Buffer)
-
-	binary.Write(buffer, binary.BigEndian, uint8(0x16))
-	binary.Write(buffer, binary.BigEndian, ProtocolVersion)
-	binary.Write(buffer, binary.BigEndian, uint16(len(payload)))
-	binary.Write(buffer, binary.BigEndian, payload)
-
-	return buffer.Bytes()
-}
 
 func main() {
 	conn, err := net.Dial("tcp", "localhost:8000")
@@ -105,9 +35,69 @@ func main() {
 		Extensions:         nil,
 	}
 
-	conn.Write(tlsRecord(clientHello.Serialize()))
+	clientHelloBytes := clientHello.Serialize()
+	handshakeMessage := HandshakeMessage{
+		MessageType: 0x01,
+		Length:      [3]byte{0, 0, byte(len(clientHelloBytes))},
+		Payload:     clientHelloBytes,
+	}
+
+	handshakeMessageBytes := handshakeMessage.Serialize()
+	tlsRecord := TlsRecord{
+		ContentType:     0x16,
+		ProtocolVersion: ProtocolVersion,
+		Length:          uint16(len(handshakeMessageBytes)),
+		Payload:         handshakeMessageBytes,
+	}
+
+	conn.Write(tlsRecord.Serialize())
 
 	buffer := make([]byte, 4096)
 	n, _ := conn.Read(buffer)
-	fmt.Printf("data: %v\n", buffer[:n])
+
+	reader := bytes.NewReader(buffer[:n])
+
+	tlsRecord.Parse(reader)
+	fmt.Printf("tlsRecord.ContentType: %v\n", tlsRecord.ContentType)
+	fmt.Printf("tlsRecord.ProtocolVersion: %v\n", tlsRecord.ProtocolVersion)
+	fmt.Printf("tlsRecord.Length: %v\n", tlsRecord.Length)
+	fmt.Println()
+
+	handshakeMessage.Parse(bytes.NewReader(tlsRecord.Payload))
+	fmt.Printf("handshakeMessage.MessageType: %v\n", handshakeMessage.MessageType)
+	fmt.Printf("handshakeMessage.Length: %v\n", handshakeMessage.Length)
+	fmt.Printf("handshakeMessage.Payload: %v\n", handshakeMessage.Payload)
+	fmt.Println()
+
+	serverHello := ServerHello{}
+	serverHello.Parse(bytes.NewReader(handshakeMessage.Payload))
+	fmt.Printf("serverHello.ProtocolVersion: %v\n", serverHello.ProtocolVersion)
+	fmt.Printf("serverHello.Random: %v\n", serverHello.Random)
+	fmt.Printf("serverHello.SessionID: %v\n", serverHello.SessionID)
+	fmt.Printf("serverHello.CipherSuite: %v\n", serverHello.CipherSuite)
+	fmt.Printf("serverHello.CompressionMethod: %v\n", serverHello.CompressionMethod)
+	fmt.Println()
+
+	fmt.Printf("n: %v\n", n)
+
+	tlsRecord.Parse(reader)
+	fmt.Printf("tlsRecord.ContentType: %v\n", tlsRecord.ContentType)
+	fmt.Printf("tlsRecord.ProtocolVersion: %v\n", tlsRecord.ProtocolVersion)
+	fmt.Printf("tlsRecord.Length: %v\n", tlsRecord.Length)
+	fmt.Println()
+
+	handshakeMessage.Parse(bytes.NewReader(tlsRecord.Payload))
+	fmt.Printf("handshakeMessage.MessageType: %v\n", handshakeMessage.MessageType)
+	fmt.Printf("handshakeMessage.Length: %v\n", handshakeMessage.Length)
+	fmt.Println()
+
+	certs := ParseCertificates(bytes.NewReader(handshakeMessage.Payload))
+	for _, cert := range certs {
+		fmt.Printf("cert.Issuer.Country: %v\n", cert.Issuer.Country)
+	}
+
+	tlsRecord.Parse(reader)
+	handshakeMessage.Parse(bytes.NewReader(tlsRecord.Payload))
+	fmt.Printf("handshakeMessage.MessageType: %v\n", handshakeMessage.MessageType)
+	fmt.Printf("handshakeMessage.Length: %v\n", handshakeMessage.Length)
 }
